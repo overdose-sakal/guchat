@@ -16,15 +16,25 @@ from .serializers import (
 )
 
 
+# class RegisterView(APIView):
+#     def post(self, request):
+#         serializer = RegisterSerializer(data=request.data)
+#         serializer.is_valid(raise_exception=True)
+#         serializer.save()
+#         return Response(
+#             {"message": "OTP sent to email"},
+#             status=status.HTTP_201_CREATED,
+#         )
+
+
 class RegisterView(APIView):
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(
-            {"message": "OTP sent to email"},
-            status=status.HTTP_201_CREATED,
-        )
+
+        if not serializer.is_valid():
+            print("❌ REGISTER ERRORS:", serializer.errors)
+            return Response(serializer.errors, status=400)
+
 
 
 class VerifyOTPView(APIView):
