@@ -16,24 +16,30 @@ from .serializers import (
 )
 
 
-# class RegisterView(APIView):
-#     def post(self, request):
-#         serializer = RegisterSerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
-#         serializer.save()
-#         return Response(
-#             {"message": "OTP sent to email"},
-#             status=status.HTTP_201_CREATED,
-#         )
-
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
 
 class RegisterView(APIView):
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
 
-        if not serializer.is_valid():
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                {"message": "OTP sent to email"},
+                status=status.HTTP_201_CREATED,
+            )
+        else:
+            # 🔴 DEBUG: print exact validation errors
             print("❌ REGISTER ERRORS:", serializer.errors)
-            return Response(serializer.errors, status=400)
+
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+          
 
 
 
