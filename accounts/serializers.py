@@ -3,9 +3,9 @@ from django.contrib.auth import authenticate
 from django.utils.crypto import get_random_string
 from django.utils import timezone
 from django.db import transaction
-from django.core.mail import send_mail
-from django.conf import settings
 import logging
+import requests  # Required to hit EmailJS API
+import os
 
 from .models import User, EmailOTP
 
@@ -34,9 +34,9 @@ class RegisterSerializer(serializers.ModelSerializer):
         logger.info(f"🟢 Starting registration for {validated_data['email']}")
         
         try:
-            # Use transaction to ensure rollback on failure
+            # Atomic transaction: if any part fails, roll back everything
             with transaction.atomic():
-                # Create user
+                # 1. Create the user
                 user = User.objects.create_user(
                     email=validated_data["email"],
                     username=validated_data["username"],
@@ -44,58 +44,64 @@ class RegisterSerializer(serializers.ModelSerializer):
                 )
                 logger.info(f"✅ User created: {user.email}")
 
-                # Generate OTP
+                # 2. Generate the 6-digit OTP
                 otp = get_random_string(length=6, allowed_chars="0123456789")
                 EmailOTP.objects.create(email=user.email, otp=otp)
-                logger.info(f"✅ OTP created: {otp}")
+                logger.info(f"✅ OTP generated (logged for backup): {otp}")
 
-                # Send email using Django SMTP (Gmail)
+                # 3. Send via EmailJS API
+                # We wrap this in a try/except so email failure doesn't crash the user creation
+                # (You can still find the OTP in logs if email fails)
                 try:
-                    self.send_otp_email(user.email, otp)
-                    logger.info(f"✅ Email sent to {user.email}")
-                    
-                except Exception as email_error:
-                    # Log the specific error from Gmail/SMTP
-                    logger.error(f"⚠️ Email sending failed: {str(email_error)}")
-                    # In development, print OTP to console so you can still verify
-                    print(f"\n\n👉 MANUALLY COPY OTP: {otp}\n\n")
+                    self.send_email_via_emailjs(user.email, user.username, otp)
+                except Exception as e:
+                    logger.error(f"⚠️ Email sending sequence failed: {str(e)}")
 
                 return user
                 
         except serializers.ValidationError:
             raise
         except Exception as e:
-            logger.error(f"❌ Registration failed: {str(e)}")
+            logger.error(f"❌ Registration process failed: {str(e)}")
             raise serializers.ValidationError(f"Registration failed: {str(e)}")
 
-    def send_otp_email(self, email, otp):
-        """Send OTP email using Django's send_mail (uses settings.py SMTP)"""
-        subject = "Your GuChat Verification Code"
-        
-        # HTML Message
-        html_message = f"""
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                <h2 style="color: #8b5cf6;">Welcome to GuChat!</h2>
-                <p>Your verification code is:</p>
-                <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
-                    <h1 style="color: #8b5cf6; font-size: 32px; letter-spacing: 8px; margin: 0;">{otp}</h1>
-                </div>
-                <p style="color: #6b7280;">This code will expire in 10 minutes.</p>
-                <p style="color: #6b7280; font-size: 12px;">If you didn't request this code, please ignore this email.</p>
-            </div>
+    def send_email_via_emailjs(self, email, username, otp):
         """
+        Sends email using EmailJS REST API.
+        This uses HTTP (Port 443) which works on Render Free Tier.
+        """
+        service_id = os.environ.get('EMAILJS_SERVICE_ID')
+        template_id = os.environ.get('EMAILJS_TEMPLATE_ID')
+        public_key = os.environ.get('EMAILJS_PUBLIC_KEY')
+        private_key = os.environ.get('EMAILJS_PRIVATE_KEY')
+
+        # Check if environment variables are set
+        if not all([service_id, template_id, public_key, private_key]):
+            logger.error("⚠️ EmailJS Env Vars missing! Cannot send email.")
+            return
+
+        url = "https://api.emailjs.com/api/v1.0/email/send"
         
-        # Plain text fallback
-        plain_message = f"Welcome to GuChat! Your verification code is: {otp}"
+        # Payload matches the variables in your HTML template
+        payload = {
+            "service_id": service_id,
+            "template_id": template_id,
+            "user_id": public_key,      # This is your Public Key
+            "accessToken": private_key, # This is your Private Key (Required for backend use)
+            "template_params": {
+                "to_email": email,      # Maps to {{to_email}} in Settings
+                "username": username,    # Maps to {{username}} in HTML
+                "otp": otp              # Maps to {{otp}} in HTML
+            }
+        }
+
+        # Send the request
+        response = requests.post(url, json=payload, timeout=10)
         
-        send_mail(
-            subject,
-            plain_message,
-            settings.DEFAULT_FROM_EMAIL,
-            [email],
-            html_message=html_message,
-            fail_silently=False, # This ensures errors are raised if SMTP fails
-        )
+        if response.status_code == 200:
+            logger.info(f"📧 Email successfully sent to {email} via EmailJS")
+        else:
+            logger.error(f"⚠️ EmailJS Failed ({response.status_code}): {response.text}")
 
 
 class VerifyOTPSerializer(serializers.Serializer):
