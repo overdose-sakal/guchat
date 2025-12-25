@@ -3,6 +3,8 @@ from django.contrib.auth import authenticate
 from django.utils.crypto import get_random_string
 from django.utils import timezone
 from django.db import transaction
+from django.core.mail import send_mail
+from django.conf import settings
 import logging
 
 from .models import User, EmailOTP
@@ -47,16 +49,16 @@ class RegisterSerializer(serializers.ModelSerializer):
                 EmailOTP.objects.create(email=user.email, otp=otp)
                 logger.info(f"✅ OTP created: {otp}")
 
-                # Try to send email using Resend
+                # Send email using Django SMTP (Gmail)
                 try:
                     self.send_otp_email(user.email, otp)
                     logger.info(f"✅ Email sent to {user.email}")
                     
                 except Exception as email_error:
+                    # Log the specific error from Gmail/SMTP
                     logger.error(f"⚠️ Email sending failed: {str(email_error)}")
-                    # Don't fail registration, just log the error
-                    # In production, you might want to queue this for retry
-                    logger.info(f"📝 OTP for {user.email}: {otp} (Email failed, logged for manual retrieval)")
+                    # In development, print OTP to console so you can still verify
+                    print(f"\n\n👉 MANUALLY COPY OTP: {otp}\n\n")
 
                 return user
                 
@@ -67,43 +69,33 @@ class RegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(f"Registration failed: {str(e)}")
 
     def send_otp_email(self, email, otp):
-        """Send OTP email using Resend API"""
-        import os
-        import requests
+        """Send OTP email using Django's send_mail (uses settings.py SMTP)"""
+        subject = "Your GuChat Verification Code"
         
-        resend_api_key = os.environ.get('RESEND_API_KEY')
-        
-        if not resend_api_key:
-            # Fallback to console output if no API key
-            logger.warning(f"⚠️ RESEND_API_KEY not set. OTP: {otp}")
-            return
-        
-        url = "https://api.resend.com/emails"
-        headers = {
-            "Authorization": f"Bearer {resend_api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "from": "GuChat <onboarding@resend.dev>",  # Use your verified domain
-            "to": [email],
-            "subject": "Your GuChat OTP",
-            "html": f"""
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                    <h2 style="color: #8b5cf6;">Welcome to GuChat!</h2>
-                    <p>Your verification code is:</p>
-                    <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
-                        <h1 style="color: #8b5cf6; font-size: 32px; letter-spacing: 8px; margin: 0;">{otp}</h1>
-                    </div>
-                    <p style="color: #6b7280;">This code will expire in 10 minutes.</p>
-                    <p style="color: #6b7280; font-size: 12px;">If you didn't request this code, please ignore this email.</p>
+        # HTML Message
+        html_message = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #8b5cf6;">Welcome to GuChat!</h2>
+                <p>Your verification code is:</p>
+                <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+                    <h1 style="color: #8b5cf6; font-size: 32px; letter-spacing: 8px; margin: 0;">{otp}</h1>
                 </div>
-            """
-        }
+                <p style="color: #6b7280;">This code will expire in 10 minutes.</p>
+                <p style="color: #6b7280; font-size: 12px;">If you didn't request this code, please ignore this email.</p>
+            </div>
+        """
         
-        response = requests.post(url, json=data, headers=headers, timeout=10)
+        # Plain text fallback
+        plain_message = f"Welcome to GuChat! Your verification code is: {otp}"
         
-        if response.status_code != 200:
-            raise Exception(f"Resend API error: {response.text}")
+        send_mail(
+            subject,
+            plain_message,
+            settings.DEFAULT_FROM_EMAIL,
+            [email],
+            html_message=html_message,
+            fail_silently=False, # This ensures errors are raised if SMTP fails
+        )
 
 
 class VerifyOTPSerializer(serializers.Serializer):

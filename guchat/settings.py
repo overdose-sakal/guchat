@@ -137,16 +137,20 @@ CORS_ALLOW_CREDENTIALS = True
 # Email Configuration
 # Use console backend for development/testing
 # In production, Resend API is used directly via requests
-EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
-EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST="smtp.gmail.com"
-EMAIL_PORT=587
-EMAIL_USE_TLS=True
 
-EMAIL_HOST_USER="mdsakibulhussain08@gmail.com"
-EMAIL_HOST_PASSWORD="rtob blqo vdvp pvpt"
-DEFAULT_FROM_EMAIL="GuChat <mdsakibulhussain08@gmail.com>"
+# Email Configuration
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+
+# SECURITY WARNING: Ideally, move these to os.environ.get inside Render!
+# For now, this matches what you provided.
+EMAIL_HOST_USER = "mdsakibulhussain08@gmail.com"
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "rtob blqo vdvp pvpt") 
+
+DEFAULT_FROM_EMAIL = "GuChat <mdsakibulhussain08@gmail.com>"
 
 
 
