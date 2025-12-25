@@ -12,4 +12,4 @@ dj-database-url
 psycopg2-binary
 daphne
 requests
-
+channels_redis>=4.0.0
