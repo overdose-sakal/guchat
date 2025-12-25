@@ -142,14 +142,17 @@ CORS_ALLOW_CREDENTIALS = True
 # Email Configuration
 # Email Configuration
 # Email Configuration (SSL Version)
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+# Email Configuration
+# Render blocks SMTP ports (465/587). 
+# We use the Console Backend to print emails to the logs instead.
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+# Keep these just in case you move to a paid server later, but they won't be used now:
 EMAIL_HOST = "smtp.gmail.com"
-EMAIL_PORT = 587           # <--- Changed from 587
-EMAIL_USE_TLS = False      # <--- Changed to False
-EMAIL_USE_SSL = True       # <--- Changed to True
-EMAIL_TIMEOUT = 10         # <--- Keep this!
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
 EMAIL_HOST_USER = "mdsakibulhussain08@gmail.com"
-EMAIL_HOST_PASSWORD = "rtob blqo vdvp pvpt" 
+EMAIL_HOST_PASSWORD = "rtob blqo vdvp pvpt"
 DEFAULT_FROM_EMAIL = "GuChat <mdsakibulhussain08@gmail.com>"
 
 
