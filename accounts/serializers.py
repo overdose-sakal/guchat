@@ -1,166 +1,230 @@
-# chat/views.py
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Max
+from rest_framework import serializers
+from django.contrib.auth import authenticate
+from django.utils.crypto import get_random_string
 from django.utils import timezone
+from django.db import transaction
+import logging
+import requests
+import os
+import base64
+import cloudinary
+import cloudinary.uploader
 
-from .models import ChatRoom, ChatMember, Message
-from .serializers import (
-    ChatRoomSerializer,
-    MessageSerializer,
-    ChatCreateSerializer,
+from .models import User, EmailOTP
+
+logger = logging.getLogger(__name__)
+
+# Configure Cloudinary
+cloudinary.config(
+    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME', 'your_cloud_name'),
+    api_key=os.environ.get('CLOUDINARY_API_KEY', '461146461426353'),
+    api_secret=os.environ.get('CLOUDINARY_API_SECRET', 'XJD2zzC9w3zZyiSnCT28fFOtwn0')
 )
 
 
-class RecentChatsView(APIView):
-    permission_classes = [IsAuthenticated]
+class RegisterSerializer(serializers.ModelSerializer):
+    profile_picture_data = serializers.CharField(required=False, write_only=True, allow_blank=True)
+    
+    class Meta:
+        model = User
+        fields = ("email", "username", "name", "password", "profile_picture_data")
+        extra_kwargs = {
+            "password": {"write_only": True},
+            "name": {"required": False}
+        }
 
-    def get(self, request):
-        member_chat_ids = (
-            ChatMember.objects
-            .filter(user=request.user)
-            .values_list("chat_id", flat=True)
-        )
+    def validate_email(self, value):
+        """Check if email already exists"""
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value
 
-        chats = (
-            ChatRoom.objects
-            .filter(id__in=member_chat_ids)
-            # ✅ OPTIMIZATION: Prefetch user data to prevent N+1 queries in serializer
-            .prefetch_related("members__user") 
-            .annotate(last_msg_time=Max("messages__created_at"))
-            .order_by("-last_msg_time", "-created_at")
-        )
+    def validate_username(self, value):
+        """Check if username already exists"""
+        if User.objects.filter(username=value).exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return value
 
-        results = []
+    def create(self, validated_data):
+        logger.info(f"🟢 Starting registration for {validated_data['email']}")
+        
+        # Extract profile picture data if provided
+        profile_picture_data = validated_data.pop('profile_picture_data', None)
+        
+        try:
+            with transaction.atomic():
+                # Upload profile picture to Cloudinary if provided
+                profile_picture_url = None
+                if profile_picture_data:
+                    try:
+                        profile_picture_url = self.upload_to_cloudinary(
+                            profile_picture_data, 
+                            validated_data['username']
+                        )
+                        logger.info(f"✅ Profile picture uploaded: {profile_picture_url}")
+                    except Exception as e:
+                        logger.error(f"⚠️ Profile picture upload failed: {str(e)}")
+                        # Continue with registration even if image upload fails
 
-        for chat in chats:
-            chat.latest_message = (
-                Message.objects
-                .filter(chat=chat)
-                .select_related("sender")
-                .order_by("-created_at")
-                .first()
-            )
-
-            chat.current_user_membership = (
-                ChatMember.objects
-                .filter(chat=chat, user=request.user)
-                .only("last_read_at")
-                .first()
-            )
-
-            results.append(chat)
-
-        serializer = ChatRoomSerializer(
-            results,
-            many=True,
-            context={"request": request},
-        )
-        raw_data = serializer.data
-
-        unique_data = []
-        seen_partners = set()
-
-        for chat in raw_data:
-            if chat["is_group"]:
-                unique_data.append(chat)
-                continue
-
-            partner = next(
-                (
-                    m for m in chat["members"]
-                    if m["username"] != request.user.username
-                ),
-                None,
-            )
-
-            if partner:
-                if partner["id"] in seen_partners:
-                    continue
-                seen_partners.add(partner["id"])
-                unique_data.append(chat)
-            else:
-                unique_data.append(chat)
-
-        return Response(unique_data)
-
-
-class ChatMessagesView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, chat_id):
-        if not ChatMember.objects.filter(chat_id=chat_id, user=request.user).exists():
-            return Response(
-                {"detail": "Not a member of this chat"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        ChatMember.objects.filter(
-            chat_id=chat_id,
-            user=request.user,
-        ).update(last_read_at=timezone.now())
-
-        messages = (
-            Message.objects
-            .filter(chat_id=chat_id)
-            .select_related("sender")
-            .order_by("-created_at")[:50]
-        )
-
-        messages = reversed(messages)
-
-        serializer = MessageSerializer(messages, many=True)
-        return Response(serializer.data)
-
-
-class CreateChatView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        serializer = ChatCreateSerializer(data=request.data)
-
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        user_ids = serializer.validated_data["user_ids"]
-        is_group = serializer.validated_data.get("is_group", False)
-        name = serializer.validated_data.get("name")
-
-        if not is_group and len(user_ids) == 2:
-            u1, u2 = user_ids
-            existing_chat = (
-                ChatRoom.objects
-                .filter(is_group=False)
-                .filter(members__user_id=u1)
-                .filter(members__user_id=u2)
-                .distinct()
-                .first()
-            )
-
-            if existing_chat:
-                return Response(
-                    ChatRoomSerializer(
-                        existing_chat,
-                        context={"request": request},
-                    ).data,
-                    status=status.HTTP_200_OK,
+                # Create user
+                user = User.objects.create_user(
+                    email=validated_data["email"],
+                    username=validated_data["username"],
+                    password=validated_data["password"],
+                    name=validated_data.get("name", ""),
+                    profile_picture=profile_picture_url
                 )
+                logger.info(f"✅ User created: {user.email}")
 
-        chat = ChatRoom.objects.create(
-            is_group=is_group,
-            name=name if is_group else None,
+                # Generate OTP
+                otp = get_random_string(length=6, allowed_chars="0123456789")
+                EmailOTP.objects.create(email=user.email, otp=otp)
+                logger.info(f"✅ OTP generated")
+
+                # Send email via EmailJS
+                try:
+                    self.send_email_via_emailjs(user.email, user.username, otp)
+                except Exception as e:
+                    logger.error(f"⚠️ Email sending failed: {str(e)}")
+                    logger.warning(f"🔑 OTP for {user.email}: {otp}")
+
+                return user
+                
+        except serializers.ValidationError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Registration failed: {str(e)}")
+            raise serializers.ValidationError(f"Registration failed: {str(e)}")
+
+    def upload_to_cloudinary(self, base64_data, username):
+        """Upload base64 image to Cloudinary"""
+        try:
+            # Remove data URL prefix if present
+            if 'base64,' in base64_data:
+                base64_data = base64_data.split('base64,')[1]
+            
+            # Upload to Cloudinary
+            response = cloudinary.uploader.upload(
+                f"data:image/png;base64,{base64_data}",
+                folder="guchat/profiles",
+                public_id=f"user_{username}_{int(timezone.now().timestamp())}",
+                overwrite=True,
+                resource_type="image",
+                transformation=[
+                    {'width': 400, 'height': 400, 'crop': 'fill', 'gravity': 'face'},
+                    {'quality': 'auto:good'}
+                ]
+            )
+            
+            return response['secure_url']
+        except Exception as e:
+            logger.error(f"Cloudinary upload error: {str(e)}")
+            raise
+
+    def send_email_via_emailjs(self, email, username, otp):
+        """Send OTP email using EmailJS REST API"""
+        service_id = os.environ.get('EMAILJS_SERVICE_ID')
+        template_id = os.environ.get('EMAILJS_TEMPLATE_ID')
+        public_key = os.environ.get('EMAILJS_PUBLIC_KEY')
+        private_key = os.environ.get('EMAILJS_PRIVATE_KEY')
+
+        if not all([service_id, template_id, public_key, private_key]):
+            logger.error("⚠️ EmailJS Env Vars missing!")
+            return
+
+        url = "https://api.emailjs.com/api/v1.0/email/send"
+        
+        payload = {
+            "service_id": service_id,
+            "template_id": template_id,
+            "user_id": public_key,
+            "accessToken": private_key,
+            "template_params": {
+                "to_email": email,
+                "username": username,
+                "otp": otp
+            }
+        }
+
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info(f"📧 Email sent to {email}")
+        else:
+            logger.error(f"⚠️ EmailJS Failed: {response.text}")
+
+
+class VerifyOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+
+    def validate(self, attrs):
+        email = attrs["email"]
+        otp = attrs["otp"]
+
+        try:
+            record = EmailOTP.objects.get(email=email, otp=otp)
+        except EmailOTP.DoesNotExist:
+            raise serializers.ValidationError("Invalid OTP")
+
+        if record.is_expired():
+            record.delete()
+            raise serializers.ValidationError("OTP expired")
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User not found")
+
+        if user.is_verified:
+            raise serializers.ValidationError("User already verified")
+
+        attrs["user"] = user
+        attrs["otp_record"] = record
+        return attrs
+
+    def save(self):
+        user = self.validated_data["user"]
+        otp_record = self.validated_data["otp_record"]
+
+        user.is_verified = True
+        user.save()
+
+        otp_record.delete()
+        return user
+
+
+class LoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        user = authenticate(
+            email=attrs["email"],
+            password=attrs["password"],
         )
 
-        for uid in user_ids:
-            ChatMember.objects.create(chat=chat, user_id=uid)
+        if not user:
+            raise serializers.ValidationError("Invalid credentials")
 
-        return Response(
-            ChatRoomSerializer(
-                chat,
-                context={"request": request},
-            ).data,
-            status=status.HTTP_201_CREATED,
-        )
+        if not user.is_verified:
+            raise serializers.ValidationError("Email not verified")
+
+        attrs["user"] = user
+        return attrs
+
+
+class MeSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = User
+        fields = ("id", "email", "username", "name", "profile_picture", "display_name", "is_verified")
+
+
+class UserSearchSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = User
+        fields = ("id", "username", "name", "profile_picture", "display_name")
