@@ -15,14 +15,10 @@ from .serializers import (
 )
 
 
-# --------------------------------------------------
-# Recent Chats
-# --------------------------------------------------
 class RecentChatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # 1. Get all chat IDs the user belongs to
         member_chat_ids = (
             ChatMember.objects
             .filter(user=request.user)
@@ -32,15 +28,15 @@ class RecentChatsView(APIView):
         chats = (
             ChatRoom.objects
             .filter(id__in=member_chat_ids)
+            # ✅ OPTIMIZATION: Prefetch user data to prevent N+1 queries in serializer
+            .prefetch_related("members__user") 
             .annotate(last_msg_time=Max("messages__created_at"))
             .order_by("-last_msg_time", "-created_at")
         )
 
         results = []
 
-        # Attach serializer-required runtime attributes
         for chat in chats:
-            # Attach latest_message
             chat.latest_message = (
                 Message.objects
                 .filter(chat=chat)
@@ -49,7 +45,6 @@ class RecentChatsView(APIView):
                 .first()
             )
 
-            # Attach membership for unread logic
             chat.current_user_membership = (
                 ChatMember.objects
                 .filter(chat=chat, user=request.user)
@@ -66,9 +61,6 @@ class RecentChatsView(APIView):
         )
         raw_data = serializer.data
 
-        # --------------------------------------------------
-        # Python-side duplicate 1-on-1 cleanup (YOUR LOGIC)
-        # --------------------------------------------------
         unique_data = []
         seen_partners = set()
 
@@ -88,7 +80,6 @@ class RecentChatsView(APIView):
             if partner:
                 if partner["id"] in seen_partners:
                     continue
-
                 seen_partners.add(partner["id"])
                 unique_data.append(chat)
             else:
@@ -97,27 +88,21 @@ class RecentChatsView(APIView):
         return Response(unique_data)
 
 
-# --------------------------------------------------
-# Chat Messages
-# --------------------------------------------------
 class ChatMessagesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, chat_id):
-        # Membership protection (YOUR EXISTING LOGIC)
         if not ChatMember.objects.filter(chat_id=chat_id, user=request.user).exists():
             return Response(
                 {"detail": "Not a member of this chat"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Update read receipt (Gemini addition)
         ChatMember.objects.filter(
             chat_id=chat_id,
             user=request.user,
         ).update(last_read_at=timezone.now())
 
-        # Fetch last 50 messages (performance fix)
         messages = (
             Message.objects
             .filter(chat_id=chat_id)
@@ -131,9 +116,6 @@ class ChatMessagesView(APIView):
         return Response(serializer.data)
 
 
-# --------------------------------------------------
-# Create Chat
-# --------------------------------------------------
 class CreateChatView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -147,7 +129,6 @@ class CreateChatView(APIView):
         is_group = serializer.validated_data.get("is_group", False)
         name = serializer.validated_data.get("name")
 
-        # Prevent duplicate 1-on-1 chats (YOUR LOGIC)
         if not is_group and len(user_ids) == 2:
             u1, u2 = user_ids
             existing_chat = (

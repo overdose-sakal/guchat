@@ -1,166 +1,131 @@
-# chat/views.py
+# chat/serializers.py
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Max
-from django.utils import timezone
-
+from rest_framework import serializers
+from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from .models import ChatRoom, ChatMember, Message
-from .serializers import (
-    ChatRoomSerializer,
-    MessageSerializer,
-    ChatCreateSerializer,
-)
+
+User = get_user_model()
 
 
-class RecentChatsView(APIView):
-    permission_classes = [IsAuthenticated]
+# --------------------------------------------------
+# Public / Minimal User Serializer
+# --------------------------------------------------
+class UserPublicSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+    is_online = serializers.SerializerMethodField()
 
-    def get(self, request):
-        member_chat_ids = (
-            ChatMember.objects
-            .filter(user=request.user)
-            .values_list("chat_id", flat=True)
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "username",
+            "display_name",
+            "profile_picture",
+            "is_online",
         )
 
-        chats = (
-            ChatRoom.objects
-            .filter(id__in=member_chat_ids)
-            # ✅ OPTIMIZATION: Prefetch user data to prevent N+1 queries in serializer
-            .prefetch_related("members__user") 
-            .annotate(last_msg_time=Max("messages__created_at"))
-            .order_by("-last_msg_time", "-created_at")
+    def get_is_online(self, obj):
+        return cache.get(f"user_online_{obj.id}") is not None
+
+
+# --------------------------------------------------
+# Message Serializer
+# --------------------------------------------------
+class MessageSerializer(serializers.ModelSerializer):
+    sender = UserPublicSerializer(read_only=True)
+    sender_id = serializers.IntegerField(source="sender.id", read_only=True)
+
+    class Meta:
+        model = Message
+        fields = (
+            "id",
+            "sender",
+            "sender_id",
+            "content",
+            "created_at",
         )
 
-        results = []
 
-        for chat in chats:
-            chat.latest_message = (
-                Message.objects
-                .filter(chat=chat)
-                .select_related("sender")
-                .order_by("-created_at")
-                .first()
+# --------------------------------------------------
+# ChatRoom Serializer
+# --------------------------------------------------
+class ChatRoomSerializer(serializers.ModelSerializer):
+    # ✅ FIX: Use SerializerMethodField to get users, not membership objects
+    members = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ChatRoom
+        fields = (
+            "id",
+            "is_group",
+            "name",
+            "members",
+            "last_message",
+            "unread_count",
+            "created_at",
+        )
+
+    # ✅ NEW: Extract User objects from the ChatMember relationship
+    def get_members(self, obj):
+        # obj.members.all() gives ChatMember objects.
+        # We need to grab the .user from each member.
+        return [UserPublicSerializer(m.user).data for m in obj.members.all()]
+
+    def get_last_message(self, obj):
+        latest_msg = getattr(obj, "latest_message", None)
+        if latest_msg:
+            return MessageSerializer(latest_msg).data
+        return None
+
+    def get_unread_count(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return 0
+
+        membership = getattr(obj, "current_user_membership", None)
+        latest_msg = getattr(obj, "latest_message", None)
+
+        if membership and latest_msg:
+            if (
+                membership.last_read_at is None
+                or latest_msg.created_at > membership.last_read_at
+            ):
+                return 1
+        return 0
+
+
+# --------------------------------------------------
+# Chat Creation Serializer (No changes needed)
+# --------------------------------------------------
+class ChatCreateSerializer(serializers.Serializer):
+    user_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False,
+        min_length=2,
+    )
+    is_group = serializers.BooleanField(default=False)
+    name = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_user_ids(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("Duplicate user IDs not allowed.")
+        return value
+
+    def validate(self, attrs):
+        user_ids = attrs["user_ids"]
+        is_group = attrs.get("is_group", False)
+
+        if not is_group and len(user_ids) != 2:
+            raise serializers.ValidationError(
+                "One-to-one chat must have exactly 2 users."
             )
 
-            chat.current_user_membership = (
-                ChatMember.objects
-                .filter(chat=chat, user=request.user)
-                .only("last_read_at")
-                .first()
+        if is_group and not attrs.get("name"):
+            raise serializers.ValidationError(
+                "Group chat requires a name."
             )
 
-            results.append(chat)
-
-        serializer = ChatRoomSerializer(
-            results,
-            many=True,
-            context={"request": request},
-        )
-        raw_data = serializer.data
-
-        unique_data = []
-        seen_partners = set()
-
-        for chat in raw_data:
-            if chat["is_group"]:
-                unique_data.append(chat)
-                continue
-
-            partner = next(
-                (
-                    m for m in chat["members"]
-                    if m["username"] != request.user.username
-                ),
-                None,
-            )
-
-            if partner:
-                if partner["id"] in seen_partners:
-                    continue
-                seen_partners.add(partner["id"])
-                unique_data.append(chat)
-            else:
-                unique_data.append(chat)
-
-        return Response(unique_data)
-
-
-class ChatMessagesView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, chat_id):
-        if not ChatMember.objects.filter(chat_id=chat_id, user=request.user).exists():
-            return Response(
-                {"detail": "Not a member of this chat"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        ChatMember.objects.filter(
-            chat_id=chat_id,
-            user=request.user,
-        ).update(last_read_at=timezone.now())
-
-        messages = (
-            Message.objects
-            .filter(chat_id=chat_id)
-            .select_related("sender")
-            .order_by("-created_at")[:50]
-        )
-
-        messages = reversed(messages)
-
-        serializer = MessageSerializer(messages, many=True)
-        return Response(serializer.data)
-
-
-class CreateChatView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        serializer = ChatCreateSerializer(data=request.data)
-
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        user_ids = serializer.validated_data["user_ids"]
-        is_group = serializer.validated_data.get("is_group", False)
-        name = serializer.validated_data.get("name")
-
-        if not is_group and len(user_ids) == 2:
-            u1, u2 = user_ids
-            existing_chat = (
-                ChatRoom.objects
-                .filter(is_group=False)
-                .filter(members__user_id=u1)
-                .filter(members__user_id=u2)
-                .distinct()
-                .first()
-            )
-
-            if existing_chat:
-                return Response(
-                    ChatRoomSerializer(
-                        existing_chat,
-                        context={"request": request},
-                    ).data,
-                    status=status.HTTP_200_OK,
-                )
-
-        chat = ChatRoom.objects.create(
-            is_group=is_group,
-            name=name if is_group else None,
-        )
-
-        for uid in user_ids:
-            ChatMember.objects.create(chat=chat, user_id=uid)
-
-        return Response(
-            ChatRoomSerializer(
-                chat,
-                context={"request": request},
-            ).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return attrs
