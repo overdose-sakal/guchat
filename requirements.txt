@@ -15,8 +15,7 @@ requests
 channels_redis>=4.0.0
 
 
-
-
+dj-database-url==3.0.1
 python-dotenv==1.2.1
 cloudinary==1.41.0
 Pillow==11.1.0
