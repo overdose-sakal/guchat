@@ -29,6 +29,8 @@ class ChatMember(models.Model):
     is_admin = models.BooleanField(default=False)
     joined_at = models.DateTimeField(auto_now_add=True)
 
+    last_read_at = models.DateTimeField(auto_now_add=True, null=True)
+
     class Meta:
         unique_together = ("chat", "user")
 

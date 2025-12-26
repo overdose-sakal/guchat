@@ -1,8 +1,11 @@
+# chat/views.py
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Max, Count
+from django.db.models import Max
+from django.utils import timezone
 
 from .models import ChatRoom, ChatMember, Message
 from .serializers import (
@@ -11,12 +14,20 @@ from .serializers import (
     ChatCreateSerializer,
 )
 
+
+# --------------------------------------------------
+# Recent Chats
+# --------------------------------------------------
 class RecentChatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # 1. Fetch all chats the user is in
-        member_chat_ids = ChatMember.objects.filter(user=request.user).values_list('chat_id', flat=True)
+        # 1. Get all chat IDs the user belongs to
+        member_chat_ids = (
+            ChatMember.objects
+            .filter(user=request.user)
+            .values_list("chat_id", flat=True)
+        )
 
         chats = (
             ChatRoom.objects
@@ -25,53 +36,104 @@ class RecentChatsView(APIView):
             .order_by("-last_msg_time", "-created_at")
         )
 
-        serializer = ChatRoomSerializer(chats, many=True)
+        results = []
+
+        # Attach serializer-required runtime attributes
+        for chat in chats:
+            # Attach latest_message
+            chat.latest_message = (
+                Message.objects
+                .filter(chat=chat)
+                .select_related("sender")
+                .order_by("-created_at")
+                .first()
+            )
+
+            # Attach membership for unread logic
+            chat.current_user_membership = (
+                ChatMember.objects
+                .filter(chat=chat, user=request.user)
+                .only("last_read_at")
+                .first()
+            )
+
+            results.append(chat)
+
+        serializer = ChatRoomSerializer(
+            results,
+            many=True,
+            context={"request": request},
+        )
         raw_data = serializer.data
 
-        # 2. PYTHON FILTER: Remove duplicate 1-on-1 chats
-        # This cleans up the "dirty data" in your database instantly for the user
+        # --------------------------------------------------
+        # Python-side duplicate 1-on-1 cleanup (YOUR LOGIC)
+        # --------------------------------------------------
         unique_data = []
         seen_partners = set()
 
         for chat in raw_data:
-            if chat['is_group']:
+            if chat["is_group"]:
+                unique_data.append(chat)
+                continue
+
+            partner = next(
+                (
+                    m for m in chat["members"]
+                    if m["username"] != request.user.username
+                ),
+                None,
+            )
+
+            if partner:
+                if partner["id"] in seen_partners:
+                    continue
+
+                seen_partners.add(partner["id"])
                 unique_data.append(chat)
             else:
-                # Find the 'other' person in the chat
-                partner = next(
-                    (m for m in chat['members'] if m['username'] != request.user.username), 
-                    None
-                )
-                
-                if partner:
-                    # If we've already seen a chat with this partner, skip this one
-                    if partner['id'] in seen_partners:
-                        continue
-                    
-                    seen_partners.add(partner['id'])
-                    unique_data.append(chat)
-                else:
-                    # Fallback for self-chats or errors
-                    unique_data.append(chat)
+                unique_data.append(chat)
 
         return Response(unique_data)
 
 
+# --------------------------------------------------
+# Chat Messages
+# --------------------------------------------------
 class ChatMessagesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, chat_id):
+        # Membership protection (YOUR EXISTING LOGIC)
         if not ChatMember.objects.filter(chat_id=chat_id, user=request.user).exists():
             return Response(
                 {"detail": "Not a member of this chat"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        messages = Message.objects.filter(chat_id=chat_id)
+        # Update read receipt (Gemini addition)
+        ChatMember.objects.filter(
+            chat_id=chat_id,
+            user=request.user,
+        ).update(last_read_at=timezone.now())
+
+        # Fetch last 50 messages (performance fix)
+        messages = (
+            Message.objects
+            .filter(chat_id=chat_id)
+            .select_related("sender")
+            .order_by("-created_at")[:50]
+        )
+
+        messages = reversed(messages)
+
         serializer = MessageSerializer(messages, many=True)
         return Response(serializer.data)
 
 
+# --------------------------------------------------
+# Create Chat
+# --------------------------------------------------
 class CreateChatView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -85,27 +147,27 @@ class CreateChatView(APIView):
         is_group = serializer.validated_data.get("is_group", False)
         name = serializer.validated_data.get("name")
 
-        # ✅ STOP DUPLICATES: Check if 1-on-1 chat already exists
+        # Prevent duplicate 1-on-1 chats (YOUR LOGIC)
         if not is_group and len(user_ids) == 2:
-            # Look for a chat that has both users
-            # We filter for chats that contain user1 AND user2
-            u1, u2 = user_ids[0], user_ids[1]
+            u1, u2 = user_ids
             existing_chat = (
-                ChatRoom.objects.filter(is_group=False)
+                ChatRoom.objects
+                .filter(is_group=False)
                 .filter(members__user_id=u1)
                 .filter(members__user_id=u2)
                 .distinct()
                 .first()
             )
-            
+
             if existing_chat:
-                # Return the existing chat instead of creating a new one
                 return Response(
-                    ChatRoomSerializer(existing_chat).data, 
-                    status=status.HTTP_200_OK
+                    ChatRoomSerializer(
+                        existing_chat,
+                        context={"request": request},
+                    ).data,
+                    status=status.HTTP_200_OK,
                 )
 
-        # If no existing chat found, create new one
         chat = ChatRoom.objects.create(
             is_group=is_group,
             name=name if is_group else None,
@@ -115,6 +177,9 @@ class CreateChatView(APIView):
             ChatMember.objects.create(chat=chat, user_id=uid)
 
         return Response(
-            ChatRoomSerializer(chat).data,
+            ChatRoomSerializer(
+                chat,
+                context={"request": request},
+            ).data,
             status=status.HTTP_201_CREATED,
         )

@@ -1,16 +1,19 @@
+# chat/serializers.py
+
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-
+from django.core.cache import cache
 from .models import ChatRoom, ChatMember, Message
 
 User = get_user_model()
 
 
 # --------------------------------------------------
-# Minimal / Public User Serializer (with profile pic)
+# Public / Minimal User Serializer
 # --------------------------------------------------
 class UserPublicSerializer(serializers.ModelSerializer):
     display_name = serializers.ReadOnlyField()
+    is_online = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -19,7 +22,12 @@ class UserPublicSerializer(serializers.ModelSerializer):
             "username",
             "display_name",
             "profile_picture",
+            "is_online",
         )
+
+    def get_is_online(self, obj):
+        # Redis / cache-based online presence
+        return cache.get(f"user_online_{obj.id}") is not None
 
 
 # --------------------------------------------------
@@ -44,8 +52,9 @@ class MessageSerializer(serializers.ModelSerializer):
 # ChatRoom Serializer
 # --------------------------------------------------
 class ChatRoomSerializer(serializers.ModelSerializer):
-    members = serializers.SerializerMethodField()
+    members = UserPublicSerializer(many=True, read_only=True)
     last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatRoom
@@ -55,18 +64,41 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             "name",
             "members",
             "last_message",
+            "unread_count",
             "created_at",
         )
 
-    def get_members(self, obj):
-        users = User.objects.filter(chat_memberships__chat=obj)
-        return UserPublicSerializer(users, many=True).data
-
     def get_last_message(self, obj):
-        last_msg = obj.messages.order_by("-created_at").first()
-        if not last_msg:
-            return None
-        return MessageSerializer(last_msg).data
+        """
+        Optimized:
+        - If the view attaches `latest_message`, use it
+        - Otherwise fallback safely
+        """
+        latest_msg = getattr(obj, "latest_message", None)
+        if latest_msg:
+            return MessageSerializer(latest_msg).data
+        return None
+
+    def get_unread_count(self, obj):
+        """
+        Purple dot logic:
+        - If last message is newer than last_read_at → unread = 1
+        """
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return 0
+
+        membership = getattr(obj, "current_user_membership", None)
+        latest_msg = getattr(obj, "latest_message", None)
+
+        if membership and latest_msg:
+            if (
+                membership.last_read_at is None
+                or latest_msg.created_at > membership.last_read_at
+            ):
+                return 1
+
+        return 0
 
 
 # --------------------------------------------------

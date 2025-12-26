@@ -131,3 +131,31 @@ class ChatConsumer(AsyncWebsocketConsumer):
             sender=user,
             content=content,
         )
+
+# chat/consumers.py
+from channels.generic.websocket import AsyncWebsocketConsumer
+from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache # ✅ Import cache
+
+class NotificationConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        user = self.scope.get("user")
+        if not user or isinstance(user, AnonymousUser):
+            await self.close()
+            return
+
+        self.group_name = f"user_{user.id}"
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+
+        # ✅ Mark user as ONLINE in Redis (lasts 5 minutes, refreshes on activity)
+        # We set it for a long time, but delete on disconnect
+        await cache.set(f"user_online_{user.id}", True, timeout=None)
+
+    async def disconnect(self, close_code):
+        user = self.scope.get("user")
+        if user:
+            # ✅ Mark user as OFFLINE
+            await cache.delete(f"user_online_{user.id}")
+            
+        await self.channel_layer.group_discard(self.group_name, self.channel_name)
