@@ -4,19 +4,34 @@ from django.utils.crypto import get_random_string
 from django.utils import timezone
 from django.db import transaction
 import logging
-import requests  # Required to hit EmailJS API
+import requests
 import os
+import base64
+import cloudinary
+import cloudinary.uploader
 
 from .models import User, EmailOTP
 
 logger = logging.getLogger(__name__)
 
+# Configure Cloudinary
+cloudinary.config(
+    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME', 'your_cloud_name'),
+    api_key=os.environ.get('CLOUDINARY_API_KEY', '461146461426353'),
+    api_secret=os.environ.get('CLOUDINARY_API_SECRET', 'XJD2zzC9w3zZyiSnCT28fFOtwn0')
+)
+
 
 class RegisterSerializer(serializers.ModelSerializer):
+    profile_picture_data = serializers.CharField(required=False, write_only=True, allow_blank=True)
+    
     class Meta:
         model = User
-        fields = ("email", "username", "password")
-        extra_kwargs = {"password": {"write_only": True}}
+        fields = ("email", "username", "name", "password", "profile_picture_data")
+        extra_kwargs = {
+            "password": {"write_only": True},
+            "name": {"required": False}
+        }
 
     def validate_email(self, value):
         """Check if email already exists"""
@@ -33,75 +48,110 @@ class RegisterSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         logger.info(f"🟢 Starting registration for {validated_data['email']}")
         
+        # Extract profile picture data if provided
+        profile_picture_data = validated_data.pop('profile_picture_data', None)
+        
         try:
-            # Atomic transaction: if any part fails, roll back everything
             with transaction.atomic():
-                # 1. Create the user
+                # Upload profile picture to Cloudinary if provided
+                profile_picture_url = None
+                if profile_picture_data:
+                    try:
+                        profile_picture_url = self.upload_to_cloudinary(
+                            profile_picture_data, 
+                            validated_data['username']
+                        )
+                        logger.info(f"✅ Profile picture uploaded: {profile_picture_url}")
+                    except Exception as e:
+                        logger.error(f"⚠️ Profile picture upload failed: {str(e)}")
+                        # Continue with registration even if image upload fails
+
+                # Create user
                 user = User.objects.create_user(
                     email=validated_data["email"],
                     username=validated_data["username"],
                     password=validated_data["password"],
+                    name=validated_data.get("name", ""),
+                    profile_picture=profile_picture_url
                 )
                 logger.info(f"✅ User created: {user.email}")
 
-                # 2. Generate the 6-digit OTP
+                # Generate OTP
                 otp = get_random_string(length=6, allowed_chars="0123456789")
                 EmailOTP.objects.create(email=user.email, otp=otp)
-                logger.info(f"✅ OTP generated (logged for backup): {otp}")
+                logger.info(f"✅ OTP generated")
 
-                # 3. Send via EmailJS API
-                # We wrap this in a try/except so email failure doesn't crash the user creation
-                # (You can still find the OTP in logs if email fails)
+                # Send email via EmailJS
                 try:
                     self.send_email_via_emailjs(user.email, user.username, otp)
                 except Exception as e:
-                    logger.error(f"⚠️ Email sending sequence failed: {str(e)}")
+                    logger.error(f"⚠️ Email sending failed: {str(e)}")
+                    logger.warning(f"🔑 OTP for {user.email}: {otp}")
 
                 return user
                 
         except serializers.ValidationError:
             raise
         except Exception as e:
-            logger.error(f"❌ Registration process failed: {str(e)}")
+            logger.error(f"❌ Registration failed: {str(e)}")
             raise serializers.ValidationError(f"Registration failed: {str(e)}")
 
+    def upload_to_cloudinary(self, base64_data, username):
+        """Upload base64 image to Cloudinary"""
+        try:
+            # Remove data URL prefix if present
+            if 'base64,' in base64_data:
+                base64_data = base64_data.split('base64,')[1]
+            
+            # Upload to Cloudinary
+            response = cloudinary.uploader.upload(
+                f"data:image/png;base64,{base64_data}",
+                folder="guchat/profiles",
+                public_id=f"user_{username}_{int(timezone.now().timestamp())}",
+                overwrite=True,
+                resource_type="image",
+                transformation=[
+                    {'width': 400, 'height': 400, 'crop': 'fill', 'gravity': 'face'},
+                    {'quality': 'auto:good'}
+                ]
+            )
+            
+            return response['secure_url']
+        except Exception as e:
+            logger.error(f"Cloudinary upload error: {str(e)}")
+            raise
+
     def send_email_via_emailjs(self, email, username, otp):
-        """
-        Sends email using EmailJS REST API.
-        This uses HTTP (Port 443) which works on Render Free Tier.
-        """
+        """Send OTP email using EmailJS REST API"""
         service_id = os.environ.get('EMAILJS_SERVICE_ID')
         template_id = os.environ.get('EMAILJS_TEMPLATE_ID')
         public_key = os.environ.get('EMAILJS_PUBLIC_KEY')
         private_key = os.environ.get('EMAILJS_PRIVATE_KEY')
 
-        # Check if environment variables are set
         if not all([service_id, template_id, public_key, private_key]):
-            logger.error("⚠️ EmailJS Env Vars missing! Cannot send email.")
+            logger.error("⚠️ EmailJS Env Vars missing!")
             return
 
         url = "https://api.emailjs.com/api/v1.0/email/send"
         
-        # Payload matches the variables in your HTML template
         payload = {
             "service_id": service_id,
             "template_id": template_id,
-            "user_id": public_key,      # This is your Public Key
-            "accessToken": private_key, # This is your Private Key (Required for backend use)
+            "user_id": public_key,
+            "accessToken": private_key,
             "template_params": {
-                "to_email": email,      # Maps to {{to_email}} in Settings
-                "username": username,    # Maps to {{username}} in HTML
-                "otp": otp              # Maps to {{otp}} in HTML
+                "to_email": email,
+                "username": username,
+                "otp": otp
             }
         }
 
-        # Send the request
         response = requests.post(url, json=payload, timeout=10)
         
         if response.status_code == 200:
-            logger.info(f"📧 Email successfully sent to {email} via EmailJS")
+            logger.info(f"📧 Email sent to {email}")
         else:
-            logger.error(f"⚠️ EmailJS Failed ({response.status_code}): {response.text}")
+            logger.error(f"⚠️ EmailJS Failed: {response.text}")
 
 
 class VerifyOTPSerializer(serializers.Serializer):
@@ -165,12 +215,16 @@ class LoginSerializer(serializers.Serializer):
 
 
 class MeSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+    
     class Meta:
         model = User
-        fields = ("id", "email", "username", "is_verified")
+        fields = ("id", "email", "username", "name", "profile_picture", "display_name", "is_verified")
 
 
 class UserSearchSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+    
     class Meta:
         model = User
-        fields = ("id", "username")
+        fields = ("id", "username", "name", "profile_picture", "display_name")

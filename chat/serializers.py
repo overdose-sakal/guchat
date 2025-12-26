@@ -6,20 +6,43 @@ from .models import ChatRoom, ChatMember, Message
 User = get_user_model()
 
 
+# --------------------------------------------------
+# Minimal / Public User Serializer (with profile pic)
+# --------------------------------------------------
 class UserPublicSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+
     class Meta:
         model = User
-        fields = ("id", "username")
+        fields = (
+            "id",
+            "username",
+            "display_name",
+            "profile_picture",
+        )
 
 
+# --------------------------------------------------
+# Message Serializer
+# --------------------------------------------------
 class MessageSerializer(serializers.ModelSerializer):
     sender = UserPublicSerializer(read_only=True)
+    sender_id = serializers.IntegerField(source="sender.id", read_only=True)
 
     class Meta:
         model = Message
-        fields = ("id", "sender", "content", "created_at")
+        fields = (
+            "id",
+            "sender",
+            "sender_id",
+            "content",
+            "created_at",
+        )
 
 
+# --------------------------------------------------
+# ChatRoom Serializer
+# --------------------------------------------------
 class ChatRoomSerializer(serializers.ModelSerializer):
     members = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
@@ -40,20 +63,28 @@ class ChatRoomSerializer(serializers.ModelSerializer):
         return UserPublicSerializer(users, many=True).data
 
     def get_last_message(self, obj):
-        last_msg = obj.messages.last()
+        last_msg = obj.messages.order_by("-created_at").first()
         if not last_msg:
             return None
         return MessageSerializer(last_msg).data
 
 
+# --------------------------------------------------
+# Chat Creation Serializer
+# --------------------------------------------------
 class ChatCreateSerializer(serializers.Serializer):
     user_ids = serializers.ListField(
         child=serializers.IntegerField(),
         allow_empty=False,
+        min_length=2,
     )
     is_group = serializers.BooleanField(default=False)
     name = serializers.CharField(required=False, allow_blank=True)
 
+    def validate_user_ids(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("Duplicate user IDs not allowed.")
+        return value
 
     def validate(self, attrs):
         user_ids = attrs["user_ids"]

@@ -29,6 +29,8 @@ class UserManager(BaseUserManager):
 class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
     username = models.CharField(max_length=32, unique=True)
+    name = models.CharField(max_length=100, blank=True, null=True)  # NEW: Full name
+    profile_picture = models.URLField(max_length=500, blank=True, null=True)  # NEW: Cloudinary URL
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
@@ -43,6 +45,11 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+    
+    @property
+    def display_name(self):
+        """Returns name if available, otherwise username"""
+        return self.name if self.name else self.username
 
 
 class EmailOTP(models.Model):
