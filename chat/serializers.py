@@ -51,7 +51,6 @@ class MessageSerializer(serializers.ModelSerializer):
 # ChatRoom Serializer
 # --------------------------------------------------
 class ChatRoomSerializer(serializers.ModelSerializer):
-    # ✅ FIX: Use SerializerMethodField to get users, not membership objects
     members = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
@@ -68,10 +67,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             "created_at",
         )
 
-    # ✅ NEW: Extract User objects from the ChatMember relationship
     def get_members(self, obj):
-        # obj.members.all() gives ChatMember objects.
-        # We need to grab the .user from each member.
         return [UserPublicSerializer(m.user).data for m in obj.members.all()]
 
     def get_last_message(self, obj):
@@ -89,16 +85,17 @@ class ChatRoomSerializer(serializers.ModelSerializer):
         latest_msg = getattr(obj, "latest_message", None)
 
         if membership and latest_msg:
+            # ✅ FIX: Only show dot if message is NEW AND sender is NOT ME
             if (
-                membership.last_read_at is None
-                or latest_msg.created_at > membership.last_read_at
+                (membership.last_read_at is None or latest_msg.created_at > membership.last_read_at)
+                and latest_msg.sender != request.user
             ):
                 return 1
         return 0
 
 
 # --------------------------------------------------
-# Chat Creation Serializer (No changes needed)
+# Chat Creation Serializer
 # --------------------------------------------------
 class ChatCreateSerializer(serializers.Serializer):
     user_ids = serializers.ListField(
