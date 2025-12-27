@@ -233,6 +233,11 @@ class UserSearchSerializer(serializers.ModelSerializer):
 
 
 # Serializer for Profile Updates
+from rest_framework import serializers
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
 # ... (Previous imports remain the same) ...
 import cloudinary.uploader
 from django.utils import timezone
@@ -278,3 +283,10 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
         instance.save()
         return instance
+
+class UserPublicSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = User
+        fields = ("id", "username", "email", "display_name", "profile_picture")
