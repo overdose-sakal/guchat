@@ -235,20 +235,20 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
-# ✅ ADD THIS SERIALIZER
+# Serializer for Profile Updates
 class UserUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ('display_name', 'profile_picture')
         extra_kwargs = {
-            'display_name': {'required': False},
+            'display_name': {'required': False, 'allow_blank': True},
             'profile_picture': {'required': False},
         }
 
-# (Ensure UserPublicSerializer is also here if you use it in accounts/views.py)
+# ✅ FIXED: Added "email" to fields
 class UserPublicSerializer(serializers.ModelSerializer):
     display_name = serializers.ReadOnlyField()
     
     class Meta:
         model = User
-        fields = ("id", "username", "display_name", "profile_picture")
+        fields = ("id", "username", "email", "display_name", "profile_picture")
