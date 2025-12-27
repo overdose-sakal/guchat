@@ -230,22 +230,23 @@ class UserSearchSerializer(serializers.ModelSerializer):
         fields = ("id", "username", "name", "profile_picture", "display_name")
 
 
+
+
+# Serializer for Profile Updates
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
-# Serializer for Profile Updates
+# ✅ FIXED: Explicitly define fields to prevent type errors
 class UserUpdateSerializer(serializers.ModelSerializer):
+    display_name = serializers.CharField(required=False, allow_blank=True)
+    profile_picture = serializers.ImageField(required=False)
+
     class Meta:
         model = User
         fields = ('display_name', 'profile_picture')
-        extra_kwargs = {
-            'display_name': {'required': False, 'allow_blank': True},
-            'profile_picture': {'required': False},
-        }
 
-# ✅ FIXED: Added "email" to fields
 class UserPublicSerializer(serializers.ModelSerializer):
     display_name = serializers.ReadOnlyField()
     
