@@ -228,3 +228,27 @@ class UserSearchSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ("id", "username", "name", "profile_picture", "display_name")
+
+
+from rest_framework import serializers
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+# ✅ ADD THIS SERIALIZER
+class UserUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('display_name', 'profile_picture')
+        extra_kwargs = {
+            'display_name': {'required': False},
+            'profile_picture': {'required': False},
+        }
+
+# (Ensure UserPublicSerializer is also here if you use it in accounts/views.py)
+class UserPublicSerializer(serializers.ModelSerializer):
+    display_name = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = User
+        fields = ("id", "username", "display_name", "profile_picture")
