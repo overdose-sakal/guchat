@@ -46,10 +46,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return self.email
     
-    @property
-    def display_name(self):
-        """Returns name if available, otherwise username"""
-        return self.name if self.name else self.username
+    display_name = models.CharField(max_length=150, blank=True, default="")
 
 
 class EmailOTP(models.Model):
