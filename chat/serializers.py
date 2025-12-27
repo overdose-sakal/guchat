@@ -7,10 +7,18 @@ from .models import ChatRoom, ChatMember, Message
 
 User = get_user_model()
 
+# ✅ NEW: Serializer for Profile Updates
+class UserUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('display_name', 'profile_picture')
+        extra_kwargs = {
+            'display_name': {'required': False},
+            'profile_picture': {'required': False},
+        }
 
-# --------------------------------------------------
-# Public / Minimal User Serializer
-# --------------------------------------------------
+# ... (Keep the rest of your serializers exactly as they are below) ...
+
 class UserPublicSerializer(serializers.ModelSerializer):
     display_name = serializers.ReadOnlyField()
     is_online = serializers.SerializerMethodField()
@@ -29,9 +37,6 @@ class UserPublicSerializer(serializers.ModelSerializer):
         return cache.get(f"user_online_{obj.id}") is not None
 
 
-# --------------------------------------------------
-# Message Serializer
-# --------------------------------------------------
 class MessageSerializer(serializers.ModelSerializer):
     sender = UserPublicSerializer(read_only=True)
     sender_id = serializers.IntegerField(source="sender.id", read_only=True)
@@ -47,11 +52,7 @@ class MessageSerializer(serializers.ModelSerializer):
         )
 
 
-# --------------------------------------------------
-# ChatRoom Serializer
-# --------------------------------------------------
 class ChatRoomSerializer(serializers.ModelSerializer):
-    # Use SerializerMethodField to get users, not membership objects
     members = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
@@ -86,9 +87,6 @@ class ChatRoomSerializer(serializers.ModelSerializer):
         latest_msg = getattr(obj, "latest_message", None)
 
         if membership and latest_msg:
-            # ✅ FIXED LOGIC: 
-            # 1. Message must be newer than last read time
-            # 2. Sender MUST NOT be the current user (ID comparison is safest)
             is_new = (membership.last_read_at is None) or (latest_msg.created_at > membership.last_read_at)
             is_from_other = (latest_msg.sender_id != request.user.id)
 
@@ -97,9 +95,6 @@ class ChatRoomSerializer(serializers.ModelSerializer):
         return 0
 
 
-# --------------------------------------------------
-# Chat Creation Serializer
-# --------------------------------------------------
 class ChatCreateSerializer(serializers.Serializer):
     user_ids = serializers.ListField(
         child=serializers.IntegerField(),
