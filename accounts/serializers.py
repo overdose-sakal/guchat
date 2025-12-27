@@ -233,23 +233,48 @@ class UserSearchSerializer(serializers.ModelSerializer):
 
 
 # Serializer for Profile Updates
-from rest_framework import serializers
-from django.contrib.auth import get_user_model
+# ... (Previous imports remain the same) ...
+import cloudinary.uploader
+from django.utils import timezone
 
-User = get_user_model()
-
-# ✅ FIXED: Explicitly define fields to prevent type errors
+# ✅ FIXED: Intercept file upload, send to Cloudinary, save URL
 class UserUpdateSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(required=False, allow_blank=True)
-    profile_picture = serializers.ImageField(required=False)
+    profile_picture = serializers.ImageField(required=False)  # Accepts file from frontend
 
     class Meta:
         model = User
         fields = ('display_name', 'profile_picture')
 
-class UserPublicSerializer(serializers.ModelSerializer):
-    display_name = serializers.ReadOnlyField()
-    
-    class Meta:
-        model = User
-        fields = ("id", "username", "email", "display_name", "profile_picture")
+    def update(self, instance, validated_data):
+        # 1. Update Display Name if present
+        if 'display_name' in validated_data:
+            instance.display_name = validated_data.get('display_name', instance.display_name)
+
+        # 2. Handle Profile Picture Upload
+        profile_pic_file = validated_data.get('profile_picture')
+        
+        if profile_pic_file:
+            try:
+                # Upload the raw file object directly to Cloudinary
+                upload_result = cloudinary.uploader.upload(
+                    profile_pic_file,
+                    folder="guchat/profiles",
+                    public_id=f"user_{instance.username}_{int(timezone.now().timestamp())}",
+                    overwrite=True,
+                    resource_type="image",
+                    transformation=[
+                        {'width': 400, 'height': 400, 'crop': 'fill', 'gravity': 'face'},
+                        {'quality': 'auto:good'}
+                    ]
+                )
+                
+                # Save the URL (String) to the model, NOT the file object
+                instance.profile_picture = upload_result['secure_url']
+            except Exception as e:
+                # Log error but don't crash everything; maybe raise ValidationError if strict
+                print(f"Error uploading image: {e}")
+                raise serializers.ValidationError({"profile_picture": "Failed to upload image to cloud."})
+
+        instance.save()
+        return instance
